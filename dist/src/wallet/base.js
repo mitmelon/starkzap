@@ -1,0 +1,560 @@
+import { Amount, } from "../types/index.js";
+import { TxBuilder } from "../tx/builder.js";
+import { Erc20 } from "../erc20/index.js";
+import { Staking } from "../staking/index.js";
+import { AvnuSwapProvider } from "../swap/index.js";
+import { resolveSwapInput } from "../swap/utils.js";
+const MAX_ERC20_CACHE_SIZE = 128;
+const MAX_STAKING_CACHE_SIZE = 128;
+/**
+ * Abstract base class for wallet implementations.
+ *
+ * Provides shared functionality, ERC20 token operations, and staking operations
+ * for all wallet types. Child classes (e.g., `Wallet`) must
+ * implement the abstract methods to provide wallet-specific behavior.
+ *
+ * @remarks
+ * This class implements the delegation pattern for ERC20 and Staking operations,
+ * caching instances per token/pool address for efficient reuse.
+ *
+ * @example
+ * ```ts
+ * class CustomWallet extends BaseWallet {
+ *   constructor(address: Address, private account: Account) {
+ *     super(address, undefined);
+ *   }
+ *
+ *   async isDeployed(): Promise<boolean> {
+ *     // Custom implementation
+ *   }
+ *   // ... implement other abstract methods
+ * }
+ * ```
+ */
+export class BaseWallet {
+    /**
+     * Creates a new BaseWallet instance.
+     * @param address - The Starknet address of this wallet
+     * @param stakingConfig - Optional staking configuration for staking operations
+     * @param defaultSwapProvider - Optional default swap provider used by `getQuote(request)` and `swap(request)`
+     */
+    constructor(address, stakingConfig, defaultSwapProvider) {
+        /**
+         * Cache of Erc20 instances keyed by token address.
+         * Prevents creating multiple instances for the same token.
+         */
+        this.erc20s = new Map();
+        /**
+         * Cache of Staking instances keyed by pool address.
+         * Prevents creating multiple instances for the same pool.
+         */
+        this.stakingMap = new Map();
+        this.stakingInFlight = new Map();
+        this.defaultSwapProviderId = null;
+        this.address = address;
+        this.stakingConfig = stakingConfig;
+        this.swapProviders = new Map();
+        const provider = defaultSwapProvider ?? new AvnuSwapProvider();
+        this.registerSwapProvider(provider, true);
+    }
+    /** @inheritdoc */
+    callContract(call) {
+        return this.getProvider().callContract(call);
+    }
+    // ============================================================
+    // Transaction builder
+    // ============================================================
+    /**
+     * Create a transaction builder for batching multiple operations into a single transaction.
+     *
+     * @returns A new TxBuilder instance bound to this wallet
+     *
+     * @example
+     * ```ts
+     * const tx = await wallet.tx()
+     *   .transfer(USDC, { to: alice, amount: Amount.parse("50", USDC) })
+     *   .enterPool(poolAddress, Amount.parse("100", STRK))
+     *   .send();
+     * await tx.wait();
+     * ```
+     */
+    tx() {
+        return new TxBuilder(this);
+    }
+    /**
+     * Fetch a quote.
+     *
+     * Set `request.provider` to a provider instance or provider id.
+     * If omitted, uses the wallet default provider.
+     */
+    async getQuote(request) {
+        const { provider, request: resolvedRequest } = resolveSwapInput(request, {
+            walletChainId: this.getChainId(),
+            takerAddress: this.address,
+            providerResolver: this,
+        });
+        return await provider.getQuote(resolvedRequest);
+    }
+    /**
+     * Execute a swap.
+     *
+     * Set `request.provider` to a provider instance or provider id.
+     * If omitted, uses the wallet default provider.
+     */
+    async swap(request, options) {
+        const { provider, request: resolvedRequest } = resolveSwapInput(request, {
+            walletChainId: this.getChainId(),
+            takerAddress: this.address,
+            providerResolver: this,
+        });
+        const prepared = await provider.swap(resolvedRequest);
+        this.assertSwapCalls(prepared.calls, `provider "${provider.id}"`);
+        return await this.execute(prepared.calls, options);
+    }
+    registerSwapProvider(provider, makeDefault = false) {
+        this.swapProviders.set(provider.id, provider);
+        if (makeDefault || this.defaultSwapProviderId == null) {
+            this.defaultSwapProviderId = provider.id;
+        }
+    }
+    setDefaultSwapProvider(providerId) {
+        if (!this.swapProviders.has(providerId)) {
+            throw new Error(`Unknown swap provider "${providerId}". Registered providers: ${this.listSwapProviders().join(", ")}`);
+        }
+        this.defaultSwapProviderId = providerId;
+    }
+    getSwapProvider(providerId) {
+        const provider = this.swapProviders.get(providerId);
+        if (!provider) {
+            throw new Error(`Unknown swap provider "${providerId}". Registered providers: ${this.listSwapProviders().join(", ")}`);
+        }
+        return provider;
+    }
+    listSwapProviders() {
+        return Array.from(this.swapProviders.keys());
+    }
+    getDefaultSwapProvider() {
+        if (!this.defaultSwapProviderId) {
+            throw new Error("No default swap provider configured");
+        }
+        return this.getSwapProvider(this.defaultSwapProviderId);
+    }
+    clearCaches() {
+        this.erc20s.clear();
+        this.stakingMap.clear();
+        this.stakingInFlight.clear();
+    }
+    assertSwapCalls(calls, source) {
+        if (calls.length) {
+            return;
+        }
+        if (source) {
+            throw new Error(`Swap ${source} returned no calls`);
+        }
+        throw new Error("Swap returned no calls");
+    }
+    evictOldest(cache) {
+        const oldest = cache.keys().next().value;
+        if (oldest !== undefined) {
+            cache.delete(oldest);
+        }
+    }
+    // ============================================================
+    // ERC20 delegated methods
+    // ============================================================
+    /**
+     * Gets or creates an Erc20 instance for the given token.
+     *
+     * Uses a cache to avoid creating multiple instances for the same token,
+     * improving performance when performing multiple operations on the same token.
+     *
+     * @param token - The token to get an Erc20 instance for
+     * @returns The cached or newly created Erc20 instance
+     */
+    erc20(token) {
+        let erc20 = this.erc20s.get(token.address);
+        if (!erc20) {
+            if (this.erc20s.size >= MAX_ERC20_CACHE_SIZE) {
+                this.evictOldest(this.erc20s);
+            }
+            erc20 = new Erc20(token, this.getProvider());
+            this.erc20s.set(token.address, erc20);
+        }
+        return erc20;
+    }
+    /**
+     * Transfer ERC20 tokens to one or more recipients.
+     *
+     * Multiple transfers can be batched into a single transaction for gas efficiency.
+     * The Amount for each transfer must match the token's decimals and symbol.
+     *
+     * @param token - The ERC20 token to transfer
+     * @param transfers - Array of transfer objects containing:
+     *   - `to`: The recipient's Starknet address
+     *   - `amount`: The Amount to transfer
+     * @param options - Optional execution options (e.g., gas settings)
+     * @returns A Tx object to track the transaction
+     *
+     * @throws Error if any amount's decimals or symbol don't match the token
+     *
+     * @example
+     * ```ts
+     * const tx = await wallet.transfer(USDC, [
+     *   { to: alice, amount: Amount.parse("50", USDC) },
+     *   { to: bob, amount: Amount.parse("25", USDC) },
+     * ]);
+     * await tx.wait();
+     * ```
+     *
+     * @see {@link Erc20#transfer}
+     */
+    async transfer(token, transfers, options) {
+        if (!transfers.length) {
+            throw new Error("At least one transfer is required");
+        }
+        const erc20 = this.erc20(token);
+        return await erc20.transfer(this, transfers, options);
+    }
+    /**
+     * Get the wallet's balance of an ERC20 token.
+     *
+     * The returned Amount includes the token's decimals and symbol,
+     * allowing for easy formatting and display.
+     *
+     * @param token - The ERC20 token to check the balance of
+     * @returns An Amount representing the token balance
+     *
+     * @example
+     * ```ts
+     * const balance = await wallet.balanceOf(USDC);
+     * console.log(balance.toFormatted()); // "150.5 USDC"
+     * ```
+     *
+     * @see {@link Erc20#balanceOf}
+     */
+    async balanceOf(token) {
+        const erc20 = this.erc20(token);
+        return await erc20.balanceOf(this);
+    }
+    // ============================================================
+    // Staking delegated methods
+    // ============================================================
+    /**
+     * Enter a delegation pool as a new member.
+     *
+     * Approves the token transfer and stakes the specified amount in the pool.
+     * The wallet must not already be a member of this pool.
+     *
+     * @param poolAddress - The pool contract address to enter
+     * @param amount - The amount of tokens to stake
+     * @param options - Optional execution options
+     * @returns A Tx object to track the transaction
+     *
+     * @throws Error if the wallet is already a member of the pool
+     *
+     * @example
+     * ```ts
+     * const tx = await wallet.enterPool(poolAddress, Amount.parse("100", STRK));
+     * await tx.wait();
+     * ```
+     *
+     * @see {@link Staking#enter}
+     */
+    async enterPool(poolAddress, amount, options) {
+        const staking = await this.staking(poolAddress);
+        return await staking.enter(this, amount, options);
+    }
+    /**
+     * Add more tokens to an existing stake in a pool.
+     *
+     * The wallet must already be a member of the pool.
+     * Use `enterPool()` for first-time staking.
+     *
+     * @param poolAddress - The pool contract address
+     * @param amount - The amount of tokens to add
+     * @param options - Optional execution options
+     * @returns A Tx object to track the transaction
+     *
+     * @throws Error if the wallet is not a member of the pool
+     *
+     * @example
+     * ```ts
+     * const tx = await wallet.addToPool(poolAddress, Amount.parse("50", STRK));
+     * await tx.wait();
+     * ```
+     *
+     * @see {@link Staking#add}
+     */
+    async addToPool(poolAddress, amount, options) {
+        const staking = await this.staking(poolAddress);
+        return await staking.add(this, amount, options);
+    }
+    /**
+     * Stake in a pool, automatically entering or adding based on membership.
+     *
+     * This is the recommended staking method for most flows:
+     * - If the wallet is not a member, it enters the pool.
+     * - If the wallet is already a member, it adds to the existing stake.
+     *
+     * @param poolAddress - The pool contract address
+     * @param amount - The amount of tokens to stake
+     * @param options - Optional execution options
+     * @returns A Tx object to track the transaction
+     *
+     * @example
+     * ```ts
+     * const tx = await wallet.stake(poolAddress, Amount.parse("100", STRK));
+     * await tx.wait();
+     * ```
+     *
+     * @see {@link Staking#stake}
+     */
+    async stake(poolAddress, amount, options) {
+        const staking = await this.staking(poolAddress);
+        return await staking.stake(this, amount, options);
+    }
+    /**
+     * Claim accumulated staking rewards from a pool.
+     *
+     * Transfers all unclaimed rewards to the wallet's reward address.
+     * The wallet must be the reward address for the pool membership.
+     *
+     * @param poolAddress - The pool contract address
+     * @param options - Optional execution options
+     * @returns A Tx object to track the transaction
+     *
+     * @throws Error if the wallet is not a member or has no rewards
+     *
+     * @example
+     * ```ts
+     * const position = await wallet.getPoolPosition(poolAddress);
+     * if (!position?.rewards.isZero()) {
+     *   const tx = await wallet.claimPoolRewards(poolAddress);
+     *   await tx.wait();
+     * }
+     * ```
+     *
+     * @see {@link Staking#claimRewards}
+     */
+    async claimPoolRewards(poolAddress, options) {
+        const staking = await this.staking(poolAddress);
+        return await staking.claimRewards(this, options);
+    }
+    /**
+     * Initiate an exit from a delegation pool.
+     *
+     * Starts the unstaking process by declaring intent to withdraw.
+     * After calling this, wait for the exit window to pass, then call
+     * `exitPool()` to complete the withdrawal.
+     *
+     * The specified amount stops earning rewards immediately and is
+     * locked until the exit window completes.
+     *
+     * @param poolAddress - The pool contract address
+     * @param amount - The amount to unstake
+     * @param options - Optional execution options
+     * @returns A Tx object to track the transaction
+     *
+     * @throws Error if the wallet is not a member or has a pending exit
+     *
+     * @example
+     * ```ts
+     * // Step 1: Declare exit intent
+     * const tx = await wallet.exitPoolIntent(poolAddress, Amount.parse("50", STRK));
+     * await tx.wait();
+     *
+     * // Step 2: Wait for exit window, then complete
+     * const position = await wallet.getPoolPosition(poolAddress);
+     * if (position?.unpoolTime && new Date() >= position.unpoolTime) {
+     *   await wallet.exitPool(poolAddress);
+     * }
+     * ```
+     *
+     * @see {@link Staking#exitIntent}
+     */
+    async exitPoolIntent(poolAddress, amount, options) {
+        const staking = await this.staking(poolAddress);
+        return await staking.exitIntent(this, amount, options);
+    }
+    /**
+     * Complete the exit from a delegation pool.
+     *
+     * Finalizes the unstaking process and transfers tokens back to the wallet.
+     * Can only be called after the exit window has passed following `exitPoolIntent()`.
+     *
+     * @param poolAddress - The pool contract address
+     * @param options - Optional execution options
+     * @returns A Tx object to track the transaction
+     *
+     * @throws Error if no exit intent exists or exit window hasn't passed
+     *
+     * @example
+     * ```ts
+     * const position = await wallet.getPoolPosition(poolAddress);
+     * if (position?.unpoolTime && new Date() >= position.unpoolTime) {
+     *   const tx = await wallet.exitPool(poolAddress);
+     *   await tx.wait();
+     * }
+     * ```
+     *
+     * @see {@link Staking#exit}
+     */
+    async exitPool(poolAddress, options) {
+        const staking = await this.staking(poolAddress);
+        return await staking.exit(this, options);
+    }
+    /**
+     * Check if the wallet is a member of a delegation pool.
+     *
+     * @param poolAddress - The pool contract address
+     * @returns True if the wallet is a pool member, false otherwise
+     *
+     * @example
+     * ```ts
+     * if (await wallet.isPoolMember(poolAddress)) {
+     *   console.log("Already staking in this pool");
+     * }
+     * ```
+     *
+     * @see {@link Staking#isMember}
+     */
+    async isPoolMember(poolAddress) {
+        const staking = await this.staking(poolAddress);
+        return await staking.isMember(this);
+    }
+    /**
+     * Get the wallet's staking position in a pool.
+     *
+     * Returns detailed information including staked amount, unclaimed rewards,
+     * exit/unpooling status, and commission rate.
+     *
+     * @param poolAddress - The pool contract address
+     * @returns The pool member position, or null if not a member
+     *
+     * @example
+     * ```ts
+     * const position = await wallet.getPoolPosition(poolAddress);
+     * if (position) {
+     *   console.log(`Staked: ${position.staked.toFormatted()}`);
+     *   console.log(`Rewards: ${position.rewards.toFormatted()}`);
+     * }
+     * ```
+     *
+     * @see {@link Staking#getPosition}
+     */
+    async getPoolPosition(poolAddress) {
+        const staking = await this.staking(poolAddress);
+        return await staking.getPosition(this);
+    }
+    /**
+     * Get the validator's commission rate for a pool.
+     *
+     * The commission is the percentage of rewards the validator takes
+     * before distributing to delegators.
+     *
+     * @param poolAddress - The pool contract address
+     * @returns The commission as a percentage (e.g., 10 means 10%)
+     *
+     * @example
+     * ```ts
+     * const commission = await wallet.getPoolCommission(poolAddress);
+     * console.log(`Validator commission: ${commission}%`);
+     * ```
+     *
+     * @see {@link Staking#getCommission}
+     */
+    async getPoolCommission(poolAddress) {
+        const staking = await this.staking(poolAddress);
+        return await staking.getCommission();
+    }
+    /**
+     * Asserts that staking configuration is available.
+     *
+     * @returns The staking configuration
+     * @throws Error if staking configuration was not provided to the SDK
+     */
+    assertStakingConfig() {
+        if (!this.stakingConfig) {
+            throw new Error("`stakingConfig` is not defined in the sdk config.");
+        }
+        return this.stakingConfig;
+    }
+    /**
+     * Get or create a Staking instance for a specific pool.
+     *
+     * Uses a cache to avoid creating multiple instances for the same pool.
+     * Use this when you know the pool contract address directly.
+     *
+     * @param poolAddress - The pool contract address
+     * @returns A Staking instance for the specified pool
+     *
+     * @throws Error if staking is not configured
+     * @throws Error if the pool doesn't exist
+     *
+     * @example
+     * ```ts
+     * const staking = await wallet.staking(poolAddress);
+     * const position = await staking.getPosition(wallet);
+     * ```
+     *
+     * @see {@link Staking.fromPool}
+     */
+    async staking(poolAddress) {
+        const config = this.assertStakingConfig();
+        const cached = this.stakingMap.get(poolAddress);
+        if (cached) {
+            return cached;
+        }
+        const inFlight = this.stakingInFlight.get(poolAddress);
+        if (inFlight) {
+            return inFlight;
+        }
+        const loading = Staking.fromPool(poolAddress, this.getProvider(), config)
+            .then((staking) => {
+            if (this.stakingMap.size >= MAX_STAKING_CACHE_SIZE) {
+                this.evictOldest(this.stakingMap);
+            }
+            this.stakingMap.set(poolAddress, staking);
+            return staking;
+        })
+            .finally(() => {
+            this.stakingInFlight.delete(poolAddress);
+        });
+        this.stakingInFlight.set(poolAddress, loading);
+        return loading;
+    }
+    /**
+     * Get or create a Staking instance for a validator's pool.
+     *
+     * This is the most common way to access staking when you want to
+     * delegate to a specific validator. Finds the pool for the specified
+     * token managed by the validator.
+     *
+     * @param stakerAddress - The validator's staker address
+     * @param token - The token to stake (e.g., STRK)
+     * @returns A Staking instance for the validator's pool
+     *
+     * @throws Error if staking is not configured
+     * @throws Error if the validator doesn't have a pool for the specified token
+     *
+     * @example
+     * ```ts
+     * const staking = await wallet.stakingInStaker(validatorAddress, STRK);
+     * await staking.enter(wallet, Amount.parse("100", STRK));
+     * ```
+     *
+     * @see {@link Staking.fromStaker}
+     */
+    async stakingInStaker(stakerAddress, token) {
+        const config = this.assertStakingConfig();
+        const staking = await Staking.fromStaker(stakerAddress, token, this.getProvider(), config);
+        const poolAddress = staking.poolAddress;
+        if (this.stakingMap.size >= MAX_STAKING_CACHE_SIZE) {
+            this.evictOldest(this.stakingMap);
+        }
+        this.stakingMap.set(poolAddress, staking);
+        this.stakingInFlight.delete(poolAddress);
+        return staking;
+    }
+}
+//# sourceMappingURL=base.js.map

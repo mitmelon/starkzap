@@ -1,0 +1,71 @@
+import type { PaymasterTimeBounds } from "starknet";
+import type { AccountClassConfig, AccountConfig, DeployMode, FeeMode, ProgressEvent } from "../types/wallet.js";
+import type { ExplorerConfig } from "../types/config.js";
+import type { WalletInterface } from "../wallet/interface.js";
+import type { AccountPresetName } from "../account/presets.js";
+import type { SwapProvider } from "../swap/interface.js";
+type PrivySigningHeaders = Record<string, string> | (() => Record<string, string> | Promise<Record<string, string>>);
+type PrivySigningBody = (params: Readonly<{
+    walletId: string;
+    hash: string;
+}>) => Record<string, unknown> | Promise<Record<string, unknown>>;
+export declare const OnboardStrategy: {
+    readonly Signer: "signer";
+    readonly Privy: "privy";
+    readonly Cartridge: "cartridge";
+};
+export type OnboardStrategy = (typeof OnboardStrategy)[keyof typeof OnboardStrategy];
+export interface OnboardBaseOptions {
+    feeMode?: FeeMode;
+    timeBounds?: PaymasterTimeBounds;
+    deploy?: DeployMode;
+    onProgress?: (event: ProgressEvent) => void;
+    /** Optional additional swap providers to register on the wallet */
+    swapProviders?: SwapProvider[];
+    /** Optional default swap provider id (must be registered) */
+    defaultSwapProviderId?: string;
+}
+export interface OnboardPrivyResolveResult {
+    walletId: string;
+    publicKey: string;
+    serverUrl?: string;
+    rawSign?: (walletId: string, messageHash: string) => Promise<string>;
+    headers?: PrivySigningHeaders;
+    buildBody?: PrivySigningBody;
+    requestTimeoutMs?: number;
+    metadata?: Record<string, unknown>;
+}
+export interface OnboardSignerOptions extends OnboardBaseOptions {
+    strategy: typeof OnboardStrategy.Signer;
+    account: AccountConfig;
+    accountPreset?: AccountPresetName | AccountClassConfig;
+}
+export interface OnboardPrivyOptions extends OnboardBaseOptions {
+    strategy: typeof OnboardStrategy.Privy;
+    privy: {
+        resolve: () => Promise<OnboardPrivyResolveResult>;
+    };
+    accountPreset?: AccountPresetName | AccountClassConfig;
+}
+export interface OnboardCartridgeOptions extends OnboardBaseOptions {
+    strategy: typeof OnboardStrategy.Cartridge;
+    cartridge?: OnboardCartridgeConfig;
+}
+export interface OnboardCartridgeConfig {
+    policies?: Array<{
+        target: string;
+        method: string;
+    }>;
+    preset?: string;
+    url?: string;
+    explorer?: ExplorerConfig;
+}
+export type OnboardOptions = OnboardSignerOptions | OnboardPrivyOptions | OnboardCartridgeOptions;
+export interface OnboardResult<TWallet extends WalletInterface = WalletInterface> {
+    wallet: TWallet;
+    strategy: OnboardStrategy;
+    deployed: boolean;
+    metadata?: Record<string, unknown>;
+}
+export {};
+//# sourceMappingURL=onboard.d.ts.map

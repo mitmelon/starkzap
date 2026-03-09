@@ -1,0 +1,379 @@
+import { RpcProvider } from "starknet";
+import { ChainId, getChainId } from "./types/config.js";
+import { networks } from "./network/index.js";
+import { Wallet } from "./wallet/index.js";
+import { assertSafeHttpUrl } from "./utils/index.js";
+import { getStakingPreset, Staking } from "./staking/index.js";
+import { PrivySigner } from "./signer/index.js";
+import { ArgentXV050Preset, OpenZeppelinPreset, accountPresets, } from "./account/index.js";
+function isWebRuntime() {
+    const hasDom = typeof window !== "undefined" &&
+        typeof document !== "undefined" &&
+        typeof document.createElement === "function";
+    const isReactNative = typeof navigator !== "undefined" && navigator.product === "ReactNative";
+    return hasDom && !isReactNative;
+}
+/**
+ * Main SDK class for Starknet wallet integration.
+ *
+ * @example
+ * ```ts
+ * import { StarkZap, StarkSigner, ArgentPreset } from "starkzap";
+ *
+ * // Using network presets (recommended)
+ * const sdk = new StarkZap({ network: "mainnet" });
+ * const sdk = new StarkZap({ network: "sepolia" });
+ *
+ * // Or with custom RPC
+ * const sdk = new StarkZap({
+ *   rpcUrl: "https://my-rpc.example.com",
+ *   chainId: ChainId.MAINNET,
+ * });
+ *
+ * // Connect with default account (OpenZeppelin)
+ * const wallet = await sdk.connectWallet({
+ *   account: { signer: new StarkSigner(privateKey) },
+ * });
+ *
+ * // Use the wallet
+ * await wallet.ensureReady({ deploy: "if_needed" });
+ * const tx = await wallet.execute([...]);
+ * await tx.wait();
+ * ```
+ */
+export class StarkZap {
+    constructor(config) {
+        this.chainValidationPromise = null;
+        this.config = this.resolveConfig(config);
+        this.provider = new RpcProvider({ nodeUrl: this.config.rpcUrl });
+    }
+    resolveConfig(config) {
+        // Get network preset if specified
+        let networkPreset;
+        if (config.network) {
+            networkPreset =
+                typeof config.network === "string"
+                    ? networks[config.network]
+                    : config.network;
+        }
+        // Resolve rpcUrl (explicit > network preset)
+        const rpcUrl = config.rpcUrl ?? networkPreset?.rpcUrl;
+        if (!rpcUrl) {
+            throw new Error("StarkZap requires either 'network' or 'rpcUrl' to be specified");
+        }
+        const normalizedRpcUrl = assertSafeHttpUrl(rpcUrl, "rpcUrl").toString();
+        // Resolve chainId (explicit > network preset)
+        const chainId = config.chainId ?? networkPreset?.chainId;
+        if (!chainId) {
+            throw new Error("StarkZap requires either 'network' or 'chainId' to be specified");
+        }
+        // Resolve explorer (explicit > network preset)
+        let explorer = config.explorer ??
+            (networkPreset?.explorerUrl
+                ? { baseUrl: networkPreset.explorerUrl }
+                : undefined);
+        if (explorer?.baseUrl) {
+            explorer = {
+                ...explorer,
+                baseUrl: assertSafeHttpUrl(explorer.baseUrl, "explorer.baseUrl").toString(),
+            };
+        }
+        const staking = config.staking ?? getStakingPreset(chainId);
+        return {
+            ...config,
+            rpcUrl: normalizedRpcUrl,
+            chainId,
+            staking,
+            ...(explorer && { explorer }),
+        };
+    }
+    getStakingConfig() {
+        if (!this.config.staking?.contract) {
+            throw new Error(`No staking contract configured for chain ${this.config.chainId.toLiteral()}. Set \`staking.contract\` explicitly in SDK config.`);
+        }
+        return this.config.staking;
+    }
+    async ensureProviderChainMatchesConfig() {
+        if (!this.chainValidationPromise) {
+            this.chainValidationPromise = (async () => {
+                const providerChainId = await getChainId(this.provider);
+                if (providerChainId.toLiteral() !== this.config.chainId.toLiteral()) {
+                    throw new Error(`RPC chain mismatch: provider returned ${providerChainId.toLiteral()} but SDK is configured for ${this.config.chainId.toLiteral()}.`);
+                }
+            })().catch((error) => {
+                this.chainValidationPromise = null;
+                throw error;
+            });
+        }
+        await this.chainValidationPromise;
+    }
+    /**
+     * Connect a wallet using the specified signer and account configuration.
+     *
+     * @example
+     * ```ts
+     * import { StarkSigner, OpenZeppelinPreset, ArgentPreset } from "starkzap";
+     *
+     * // Default: OpenZeppelin account
+     * const wallet = await sdk.connectWallet({
+     *   account: { signer: new StarkSigner(privateKey) },
+     * });
+     *
+     * // With Argent preset
+     * const wallet = await sdk.connectWallet({
+     *   account: {
+     *     signer: new StarkSigner(privateKey),
+     *     accountClass: ArgentPreset,
+     *   },
+     * });
+     *
+     * // With custom account class
+     * const wallet = await sdk.connectWallet({
+     *   account: {
+     *     signer: new StarkSigner(privateKey),
+     *     accountClass: {
+     *       classHash: "0x...",
+     *       buildConstructorCalldata: (pk) => [pk, "0x0"],
+     *     },
+     *   },
+     * });
+     *
+     * // With sponsored transactions
+     * const wallet = await sdk.connectWallet({
+     *   account: { signer: new StarkSigner(privateKey) },
+     *   feeMode: "sponsored",
+     * });
+     * ```
+     */
+    async connectWallet(options) {
+        await this.ensureProviderChainMatchesConfig();
+        const { account, feeMode, timeBounds, swapProviders, defaultSwapProviderId, } = options;
+        return Wallet.create({
+            account,
+            provider: this.provider,
+            config: this.config,
+            ...(feeMode && { feeMode }),
+            ...(timeBounds && { timeBounds }),
+            ...(swapProviders && { swapProviders }),
+            ...(defaultSwapProviderId && { defaultSwapProviderId }),
+        });
+    }
+    resolveAccountPreset(preset, fallback) {
+        if (!preset)
+            return fallback;
+        if (typeof preset === "string") {
+            const resolved = accountPresets[preset];
+            if (!resolved) {
+                throw new Error(`Unknown account preset: ${preset}`);
+            }
+            return resolved;
+        }
+        return preset;
+    }
+    /**
+     * High-level onboarding API for app integrations.
+     *
+     * Strategy behaviors:
+     * - `signer`: connect with a provided signer/account config
+     * - `privy`: resolve Privy auth context, then connect via PrivySigner
+     * - `cartridge`: connect via Cartridge Controller
+     *
+     * By default, onboarding calls `wallet.ensureReady({ deploy: "if_needed" })`.
+     */
+    async onboard(options) {
+        const deploy = options.deploy ?? "if_needed";
+        const feeMode = options.feeMode;
+        const timeBounds = options.timeBounds;
+        const swapProviders = options.swapProviders;
+        const defaultSwapProviderId = options.defaultSwapProviderId;
+        const shouldEnsureReady = deploy !== "never";
+        if (options.strategy === "signer") {
+            const wallet = await this.connectWallet({
+                account: {
+                    signer: options.account.signer,
+                    accountClass: this.resolveAccountPreset(options.accountPreset ?? options.account.accountClass, OpenZeppelinPreset),
+                },
+                ...(feeMode && { feeMode }),
+                ...(timeBounds && { timeBounds }),
+                ...(swapProviders && { swapProviders }),
+                ...(defaultSwapProviderId && { defaultSwapProviderId }),
+            });
+            if (shouldEnsureReady) {
+                await wallet.ensureReady({
+                    deploy,
+                    ...(feeMode && { feeMode }),
+                    ...(options.onProgress && { onProgress: options.onProgress }),
+                });
+            }
+            return {
+                wallet,
+                strategy: options.strategy,
+                deployed: await wallet.isDeployed(),
+            };
+        }
+        if (options.strategy === "privy") {
+            const privy = await options.privy.resolve();
+            const signer = new PrivySigner({
+                walletId: privy.walletId,
+                publicKey: privy.publicKey,
+                ...(privy.serverUrl && { serverUrl: privy.serverUrl }),
+                ...(privy.rawSign && { rawSign: privy.rawSign }),
+                ...(privy.headers && { headers: privy.headers }),
+                ...(privy.buildBody && { buildBody: privy.buildBody }),
+                ...(privy.requestTimeoutMs && {
+                    requestTimeoutMs: privy.requestTimeoutMs,
+                }),
+            });
+            const wallet = await this.connectWallet({
+                account: {
+                    signer,
+                    accountClass: this.resolveAccountPreset(options.accountPreset, ArgentXV050Preset),
+                },
+                ...(feeMode && { feeMode }),
+                ...(timeBounds && { timeBounds }),
+                ...(swapProviders && { swapProviders }),
+                ...(defaultSwapProviderId && { defaultSwapProviderId }),
+            });
+            if (shouldEnsureReady) {
+                await wallet.ensureReady({
+                    deploy,
+                    ...(feeMode && { feeMode }),
+                    ...(options.onProgress && { onProgress: options.onProgress }),
+                });
+            }
+            return {
+                wallet,
+                strategy: options.strategy,
+                deployed: await wallet.isDeployed(),
+                ...(privy.metadata && { metadata: privy.metadata }),
+            };
+        }
+        if (options.strategy === "cartridge") {
+            const wallet = await this.connectCartridge({
+                ...(options.cartridge ?? {}),
+                ...(feeMode && { feeMode }),
+                ...(timeBounds && { timeBounds }),
+            });
+            if (swapProviders?.length) {
+                for (const swapProvider of swapProviders) {
+                    wallet.registerSwapProvider(swapProvider);
+                }
+            }
+            if (defaultSwapProviderId) {
+                wallet.setDefaultSwapProvider(defaultSwapProviderId);
+            }
+            if (shouldEnsureReady) {
+                await wallet.ensureReady({
+                    deploy,
+                    ...(feeMode && { feeMode }),
+                    ...(options.onProgress && { onProgress: options.onProgress }),
+                });
+            }
+            return {
+                wallet,
+                strategy: options.strategy,
+                deployed: await wallet.isDeployed(),
+            };
+        }
+        const _never = options;
+        throw new Error(`Unknown onboard strategy: ${String(_never)}`);
+    }
+    /**
+     * Connect using Cartridge Controller.
+     *
+     * Opens the Cartridge authentication popup for social login or passkeys.
+     * Returns a CartridgeWallet that implements WalletInterface.
+     *
+     * @example
+     * ```ts
+     * const wallet = await sdk.connectCartridge({
+     *   policies: [
+     *     { target: "0xCONTRACT", method: "transfer" }
+     *   ]
+     * });
+     *
+     * // Use just like any other wallet
+     * await wallet.execute([...]);
+     *
+     * // Access Cartridge-specific features
+     * const controller = wallet.getController();
+     * controller.openProfile();
+     * ```
+     */
+    async connectCartridge(options = {}) {
+        await this.ensureProviderChainMatchesConfig();
+        const explorer = options.explorer ?? this.config.explorer;
+        if (!isWebRuntime()) {
+            throw new Error("Cartridge is only supported in web environments. Use signer/privy strategies on native or server runtimes.");
+        }
+        const { CartridgeWallet } = await import("./wallet/cartridge.js");
+        const wallet = await CartridgeWallet.create({
+            ...(options.policies && { policies: options.policies }),
+            ...(options.preset && { preset: options.preset }),
+            ...(options.url && { url: options.url }),
+            ...(options.feeMode && { feeMode: options.feeMode }),
+            ...(options.timeBounds && { timeBounds: options.timeBounds }),
+            rpcUrl: this.config.rpcUrl,
+            chainId: this.config.chainId,
+            ...(explorer && { explorer }),
+        }, this.config.staking);
+        return wallet;
+    }
+    /**
+     * Get all tokens that are currently enabled for staking.
+     *
+     * Returns the list of tokens that can be staked in the protocol.
+     * Typically includes STRK and may include other tokens.
+     *
+     * @returns Array of tokens that can be staked
+     * @throws Error if staking is not configured in the SDK config
+     *
+     * @example
+     * ```ts
+     * const tokens = await sdk.stakingTokens();
+     * console.log(`Stakeable tokens: ${tokens.map(t => t.symbol).join(', ')}`);
+     * // Output: "Stakeable tokens: STRK, BTC"
+     * ```
+     */
+    async stakingTokens() {
+        return Staking.activeTokens(this.provider, this.getStakingConfig());
+    }
+    /**
+     * Get all delegation pools managed by a specific validator.
+     *
+     * Validators can have multiple pools, one for each supported token.
+     * Use this to discover what pools a validator offers and their current
+     * delegation amounts.
+     *
+     * @param staker - The validator's staker address
+     * @returns Array of pools with their contract addresses, tokens, and amounts
+     * @throws Error if staking is not configured in the SDK config
+     *
+     * @example
+     * ```ts
+     * const pools = await sdk.getStakerPools(validatorAddress);
+     * for (const pool of pools) {
+     *   console.log(`${pool.token.symbol}: ${pool.amount.toFormatted()} delegated`);
+     * }
+     * ```
+     */
+    async getStakerPools(staker) {
+        return await Staking.getStakerPools(this.provider, staker, this.getStakingConfig());
+    }
+    /**
+     * Get the underlying RPC provider.
+     */
+    getProvider() {
+        return this.provider;
+    }
+    /**
+     * Call a read-only contract entrypoint using the SDK provider.
+     *
+     * This executes an RPC `call` without sending a transaction.
+     * Useful before wallet connection or for app-level reads.
+     */
+    callContract(call) {
+        return this.provider.callContract(call);
+    }
+}
+//# sourceMappingURL=sdk.js.map
