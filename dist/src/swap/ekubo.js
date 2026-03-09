@@ -1,5 +1,5 @@
 import { fromAddress } from "../types/index.js";
-import { buildEkuboSwapCalls, DEFAULT_EKUBO_API_BASE, getEkuboErrorMessageFromPayload, getEkuboQuoterChainId, parseEkuboQuoteResponse, toEkuboSwapQuote, } from "../swap/ekubo.helpers";
+import { buildEkuboSwapCalls, DEFAULT_EKUBO_API_BASE, getEkuboErrorMessageFromPayload, getEkuboQuoterChainId, parseEkuboQuoteResponse, toEkuboSwapQuote, } from "../swap/ekubo.helpers.js";
 /**
  * Chain-aware Ekubo presets.
  *

@@ -93,11 +93,12 @@ async function fixFile(filePath) {
   for (const m of src.matchAll(IMPORT_RE)) {
     const specifier = m[3]; // e.g. "./foo"
 
-    // Already has a meaningful extension — skip.
-    // Treat specifiers ending with .d.ts as unresolved (shouldn't appear in
-    // emitted output, but guard anyway by NOT skipping them).
+    // Skip only if the specifier already ends with a real module extension.
+    // Importantly, dotted names like "./presets.sepolia" must NOT be skipped —
+    // extname would return ".sepolia" which is not a loadable extension.
+    const RESOLVED_EXTS = new Set([".js", ".mjs", ".cjs", ".json", ".node"]);
     const ext = extname(specifier);
-    if (ext && ext !== ".ts") {
+    if (RESOLVED_EXTS.has(ext)) {
       result += src.slice(last, m.index + m[0].length);
       last = m.index + m[0].length;
       continue;

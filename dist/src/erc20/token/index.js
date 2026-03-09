@@ -2,10 +2,10 @@ import { CairoFelt252, Contract, RpcProvider } from "starknet";
 import { getChainId } from "../../types/index.js";
 import { groupBy } from "../../utils/index.js";
 import { mainnetTokens } from "../../erc20/token/presets.js";
-import { sepoliaTokens } from "../../erc20/token/presets.sepolia";
+import { sepoliaTokens } from "../../erc20/token/presets.sepolia.js";
 import { ABI as ERC20_ABI } from "../../abi/erc20.js";
 export * from "../../erc20/token/presets.js";
-export * from "../../erc20/token/presets.sepolia";
+export * from "../../erc20/token/presets.sepolia.js";
 export function getPresets(chainId) {
     if (chainId.isMainnet())
         return mainnetTokens;
