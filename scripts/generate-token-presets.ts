@@ -1,0 +1,280 @@
+// noinspection ES6PreferShortImport
+
+/**
+ * Fetches verified ERC20 tokens from AVNU API and generates TypeScript presets.
+ *
+ * Usage:
+ *   npm run generate:tokens
+ *   npm run generate:tokens:sepolia
+ *
+ * Options:
+ *   --network    (mainnet or sepolia) Network to fetch tokens for.
+ *
+ * Arguments:
+ *   output-path  Path to output TypeScript file (default: src/erc20/token/presets.ts)
+ *
+ * API Documentation: https://docs.avnu.fi/api/tokens/get-tokens
+ */
+
+import { execSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+import { type Address, fromAddress } from "@/types";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const AVNU_API_URLS = {
+  mainnet: "https://starknet.api.avnu.fi/v1/starknet/tokens",
+  sepolia: "https://sepolia.api.avnu.fi/v1/starknet/tokens",
+} as const;
+
+type Network = keyof typeof AVNU_API_URLS;
+
+const DEFAULT_OUTPUT_PATHS: Record<Network, string> = {
+  mainnet: resolve(__dirname, "../src/erc20/token/presets.ts"),
+  sepolia: resolve(__dirname, "../src/erc20/token/presets.sepolia.ts"),
+};
+
+const { values, positionals } = parseArgs({
+  allowPositionals: true,
+  options: {
+    network: { type: "string", short: "n" },
+  },
+});
+
+const network = values.network as Network | undefined;
+
+function getOutputPath(): string {
+  if (positionals[0]) {
+    return resolve(positionals[0]);
+  }
+  if (network && network in DEFAULT_OUTPUT_PATHS) {
+    return DEFAULT_OUTPUT_PATHS[network];
+  }
+  return DEFAULT_OUTPUT_PATHS.mainnet;
+}
+
+interface AvnuToken {
+  address: string;
+  name: string;
+  symbol: string;
+  decimals: number;
+  logoUri: string | null;
+  lastDailyVolumeUsd: number;
+  extensions: Record<string, unknown>;
+  tags: string[];
+}
+
+interface AvnuResponse {
+  content: AvnuToken[];
+  size: number;
+  number: number;
+  totalElements: number;
+  totalPages: number;
+}
+
+interface Token {
+  name: string;
+  address: Address;
+  decimals: number;
+  symbol: string;
+  logoUrl: string | null;
+}
+
+async function fetchPage(
+  page: number,
+  apiUrl: string,
+  onlyVerified: boolean
+): Promise<AvnuResponse> {
+  const url = new URL(apiUrl);
+  url.searchParams.set("page", page.toString());
+  url.searchParams.set("size", "100");
+  if (onlyVerified) {
+    url.searchParams.set("tag", "Verified");
+  }
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      "AVNU API error: " + response.status + " " + response.statusText
+    );
+  }
+
+  return response.json() as Promise<AvnuResponse>;
+}
+
+function transformToken(avnuToken: AvnuToken): Token {
+  return {
+    name: avnuToken.name,
+    address: fromAddress(avnuToken.address),
+    decimals: avnuToken.decimals,
+    symbol: avnuToken.symbol,
+    logoUrl: avnuToken.logoUri,
+  };
+}
+
+async function fetchAllTokens(
+  apiUrl: string,
+  onlyVerified: boolean
+): Promise<Token[]> {
+  const tokens: Token[] = [];
+  let page = 0; // AVNU API uses zero-based page index
+  let totalPages = 1;
+
+  console.log(
+    "Fetching verified ERC20 tokens from AVNU API (" + apiUrl + ")..."
+  );
+
+  do {
+    const pageInfo =
+      totalPages > 1 ? page + 1 + "/" + totalPages : page + 1 + "/...";
+    console.log("  Fetching page " + pageInfo);
+    const response = await fetchPage(page, apiUrl, onlyVerified);
+    totalPages = response.totalPages;
+
+    for (const item of response.content) {
+      tokens.push(transformToken(item));
+    }
+
+    page++;
+  } while (page < totalPages);
+
+  return tokens;
+}
+
+/**
+ * Convert a token symbol to a valid TypeScript key name.
+ */
+function toKeyName(symbol: string): string | null {
+  let name = symbol
+    .replace(/[^a-zA-Z0-9_]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "")
+    .toUpperCase();
+
+  // Skip tokens with purely numeric names
+  if (/^[0-9]+$/.test(name)) {
+    return null;
+  }
+
+  // Prefix with underscore if starts with a number
+  if (/^[0-9]/.test(name)) {
+    name = "_" + name;
+  }
+
+  // Fallback for empty names
+  if (!name) {
+    return null;
+  }
+
+  return name;
+}
+
+/**
+ * Escape a string for use in TypeScript source code.
+ */
+function escapeString(str: string): string {
+  return str
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r");
+}
+
+/**
+ * Generate TypeScript presets file content for a specific network.
+ */
+function generatePresets(tokens: Token[], networkName: Network): string {
+  const subdomain = networkName === "sepolia" ? "sepolia." : "starknet.";
+  const lines: string[] = [
+    "/**",
+    ` * Verified ERC20 token presets for Starknet ${networkName}.`,
+    " *",
+    " * AUTO-GENERATED FILE - DO NOT EDIT MANUALLY",
+    ` * Generated by: npx tsx scripts/generate-token-presets.ts --network ${networkName}`,
+    ` * Source: AVNU API (https://${subdomain}api.avnu.fi)`,
+    " */",
+    "",
+    'import type { Token, Address } from "@/types";',
+    "",
+    `export const ${networkName}Tokens = {`,
+  ];
+
+  // Track used key names to handle duplicates
+  const usedNames = new Map<string, number>();
+
+  for (const token of tokens) {
+    const keyName = toKeyName(token.symbol);
+    if (!keyName) {
+      // Omit tokens with no name
+      continue;
+    }
+
+    // Handle duplicate key names
+    const count = usedNames.get(keyName) ?? 0;
+    let constantName = keyName;
+    if (count > 0) {
+      constantName = keyName + "_" + count;
+    }
+    usedNames.set(keyName, count + 1);
+
+    lines.push(`  ${constantName}: {`);
+    lines.push(`    name: "${escapeString(token.name)}",`);
+    lines.push(`    address: "${token.address}" as Address,`);
+    lines.push(`    decimals: ${token.decimals},`);
+    lines.push(`    symbol: "${escapeString(token.symbol)}",`);
+    if (token.logoUrl) {
+      lines.push(`    metadata: {`);
+      lines.push(`      logoUrl: new URL("${escapeString(token.logoUrl)}"),`);
+      lines.push(`    },`);
+    }
+    lines.push("  },");
+  }
+
+  lines.push("} as const satisfies Record<string, Token>;");
+  lines.push("");
+
+  return lines.join("\n");
+}
+
+async function main() {
+  if (!network || !["mainnet", "sepolia"].includes(network)) {
+    console.error("Error: --network flag is required (mainnet or sepolia)");
+    console.error(
+      "Usage: npx tsx scripts/generate-token-presets.ts --network <network>"
+    );
+    process.exit(1);
+  }
+
+  const apiUrl = AVNU_API_URLS[network];
+
+  try {
+    const tokens = await fetchAllTokens(apiUrl, network === "mainnet");
+
+    console.log(
+      "\nFetched " + tokens.length + " verified ERC20 tokens for " + network
+    );
+
+    const presetsContent = generatePresets(tokens, network);
+    const outputPath = getOutputPath();
+    writeFileSync(outputPath, presetsContent);
+
+    console.log(`Written presets to ${outputPath}`);
+
+    // Format with prettier
+    console.log("Formatting with prettier...");
+    execSync(`npx prettier --write "${outputPath}"`, { stdio: "inherit" });
+  } catch (error) {
+    console.error("Failed to generate presets:", error);
+    process.exit(1);
+  }
+}
+
+main();

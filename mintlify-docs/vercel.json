@@ -1,0 +1,6 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": ".mint",
+  "installCommand": "npm install",
+  "framework": null
+}

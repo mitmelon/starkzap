@@ -1,0 +1,108 @@
+{
+  "name": "starkzap",
+  "version": "1.0.0",
+  "description": "Helper sdk for easy wallet integration",
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "homepage": "https://github.com/keep-starknet-strange/x#readme",
+  "bugs": {
+    "url": "https://github.com/keep-starknet-strange/x/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/keep-starknet-strange/x.git"
+  },
+  "license": "MIT",
+  "author": "0xLucqs",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "require": "./dist/src/index.cjs",
+      "import": "./dist/src/index.js"
+    },
+    "./cartridge": {
+      "types": "./dist/src/cartridge.d.ts",
+      "import": "./dist/src/cartridge.js"
+    }
+  },
+  "peerDependencies": {
+    "@cartridge/controller": "^0.13.9"
+  },
+  "peerDependenciesMeta": {
+    "@cartridge/controller": {
+      "optional": true
+    },
+    "react-native-get-random-values": {
+      "optional": true
+    },
+    "fast-text-encoding": {
+      "optional": true
+    },
+    "@ethersproject/shims": {
+      "optional": true
+    }
+  },
+  "files": [
+    "dist",
+    "scripts/fix-esm-imports.mjs"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc && tsc-alias && node scripts/fix-esm-imports.mjs",
+    "build:all": "npm run build --workspace @starkzap/native",
+    "typecheck": "tsc --noEmit",
+    "typecheck:all": "npm run typecheck --workspace @starkzap/native",
+    "lint": "eslint .",
+    "fix": "eslint . --fix",
+    "prettier": "prettier --write .",
+    "prettier:check": "prettier --check .",
+    "test": "vitest run --project unit",
+    "test:watch": "vitest --project unit",
+    "test:coverage": "vitest run --project unit --coverage",
+    "test:integration": "vitest run --project integration",
+    "test:integration:watch": "vitest --project integration",
+    "test:all": "vitest run",
+    "generate:tokens": "npx tsx scripts/generate-token-presets.ts --network mainnet",
+    "generate:tokens:sepolia": "npx tsx scripts/generate-token-presets.ts --network sepolia",
+    "generate:validators": "npx tsx scripts/generate-validator-presets.ts --network mainnet",
+    "generate:validators:sepolia": "npx tsx scripts/generate-validator-presets.ts --network sepolia",
+    "docs:api": "typedoc --options typedoc.json",
+    "docs:export": "npm run docs:api && node scripts/docs-export.mjs",
+    "docs:check": "npm run docs:api",
+    "example:server": "npm run start --workspace starkzap-example-server",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@0no-co/graphql.web": "^1.2.0",
+    "@cartridge/controller": "^0.13.9",
+    "@eslint/js": "^9.39.2",
+    "@vitest/coverage-v8": "^4.0.17",
+    "bestzip": "^2.2.1",
+    "dotenv": "^17.2.3",
+    "eslint": "^9.39.2",
+    "eslint-config-prettier": "^10.1.8",
+    "husky": "^9.1.7",
+    "prettier": "3.8.1",
+    "starknet-devnet": "^0.7.2",
+    "tsc-alias": "^1.8.16",
+    "tsx": "^4.21.0",
+    "typedoc": "^0.28.16",
+    "typedoc-plugin-markdown": "^4.10.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.53.1",
+    "utf-8-validate": "^6.0.6",
+    "vite": "^7.3.1",
+    "vitest": "^4.0.17"
+  },
+  "dependencies": {
+    "@avnu/avnu-sdk": "^4.1.0-rc.0",
+    "starknet": "^9.2.1"
+  }
+}
