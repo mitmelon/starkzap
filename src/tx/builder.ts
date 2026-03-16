@@ -18,6 +18,12 @@ import type {
   PreflightResult,
   Token,
 } from "@/types";
+import type { ConfidentialProvider } from "@/confidential";
+import type {
+  ConfidentialFundDetails,
+  ConfidentialTransferDetails,
+  ConfidentialWithdrawDetails,
+} from "@/confidential";
 
 /**
  * Fluent transaction builder for batching multiple operations into a single transaction.
@@ -484,6 +490,89 @@ export class TxBuilder {
       .staking(poolAddress)
       .then((s) => [s.populateExit(this.wallet.address)]);
     this.queueAsyncCalls(p);
+    return this;
+  }
+
+  // ============================================================
+  // Confidential operations
+  // ============================================================
+
+  /**
+   * Fund a confidential account.
+   *
+   * The provider returns all necessary calls (including ERC20 approve
+   * when required), so no manual approve step is needed.
+   *
+   * @param confidential - A {@link ConfidentialProvider} instance
+   * @param details - Fund parameters (amount, sender)
+   * @returns this (for chaining)
+   *
+   * @example
+   * ```ts
+   * wallet.tx()
+   *   .confidentialFund(confidential, { amount: Amount.fromRaw(100n, token), sender: wallet.address })
+   *   .send();
+   * ```
+   */
+  confidentialFund(
+    confidential: ConfidentialProvider,
+    details: ConfidentialFundDetails
+  ): this {
+    this.queueAsyncCalls(confidential.fund(details));
+    return this;
+  }
+
+  /**
+   * Transfer between confidential accounts.
+   *
+   * Generates ZK proofs for the confidential transfer.
+   *
+   * @param confidential - A {@link ConfidentialProvider} instance
+   * @param details - Transfer parameters (amount, recipient pubkey, sender)
+   * @returns this (for chaining)
+   *
+   * @example
+   * ```ts
+   * wallet.tx()
+   *   .confidentialTransfer(confidential, {
+   *     amount: Amount.fromRaw(50n, token),
+   *     to: recipientPubKey,
+   *     sender: wallet.address,
+   *   })
+   *   .send();
+   * ```
+   */
+  confidentialTransfer(
+    confidential: ConfidentialProvider,
+    details: ConfidentialTransferDetails
+  ): this {
+    this.queueAsyncCalls(confidential.transfer(details));
+    return this;
+  }
+
+  /**
+   * Withdraw from a confidential account to a public address.
+   *
+   * @param confidential - A {@link ConfidentialProvider} instance
+   * @param details - Withdraw parameters (amount, recipient, sender)
+   * @returns this (for chaining)
+   *
+   * @example
+   * ```ts
+   * wallet.tx()
+   *   .confidentialWithdraw(confidential, {
+   *     amount: Amount.fromRaw(50n, token),
+   *     to: wallet.address,
+   *     sender: wallet.address,
+   *   })
+   *   .send();
+   * ```
+   */
+  confidentialWithdraw(
+    confidential: ConfidentialProvider,
+    details: ConfidentialWithdrawDetails
+  ): this {
+    this.queueAsyncCalls(confidential.withdraw(details));
     return this;
   }
 
