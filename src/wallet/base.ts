@@ -29,9 +29,15 @@ import type {
 } from "starknet";
 import { Erc20 } from "@/erc20";
 import { Staking } from "@/staking";
-import type { SwapInput, SwapProvider, SwapQuote } from "@/swap";
+import type { PreparedSwap, SwapInput, SwapQuote, SwapProvider } from "@/swap";
 import { AvnuSwapProvider } from "@/swap";
 import { resolveSwapInput } from "@/swap/utils";
+import {
+  AvnuDcaProvider,
+  DcaClient,
+  type DcaClientInterface,
+  type DcaProvider,
+} from "@/dca";
 import {
   LendingClient,
   type LendingProvider,
@@ -94,6 +100,8 @@ export abstract class BaseWallet implements WalletInterface {
   /**
    * Creates a new BaseWallet instance.
    * @param options - Wallet configuration options
+   *
+   * `defaultSwapProvider` is used by `getQuote(request)`, `prepareSwap(request)`, and `swap(request)`.
    */
   protected constructor(options: {
     address: Address;
@@ -101,6 +109,7 @@ export abstract class BaseWallet implements WalletInterface {
     bridgingConfig?: BridgingConfig | undefined;
     defaultSwapProvider?: SwapProvider | undefined;
     defaultLendingProvider?: LendingProvider | undefined;
+    defaultDcaProvider?: DcaProvider | undefined;
   }) {
     this.address = options.address;
     this.stakingConfig = options.stakingConfig;
@@ -118,12 +127,24 @@ export abstract class BaseWallet implements WalletInterface {
       },
       options.defaultLendingProvider ?? new VesuLendingProvider()
     );
+    this.dcaClient = new DcaClient(
+      {
+        address: this.address,
+        getChainId: () => this.getChainId(),
+        getProvider: () => this.getProvider(),
+        execute: (calls, options) => this.execute(calls, options),
+        getDefaultSwapProvider: () => this.getDefaultSwapProvider(),
+        getSwapProvider: (providerId) => this.getSwapProvider(providerId),
+      },
+      options.defaultDcaProvider ?? new AvnuDcaProvider()
+    );
   }
 
   /** Registered swap providers by id. */
   private readonly swapProviders: Map<string, SwapProvider>;
   private defaultSwapProviderId: string | null = null;
   private readonly lendingClient: LendingClient;
+  private readonly dcaClient: DcaClient;
 
   // ============================================================
   // Abstract methods - children MUST implement
@@ -203,6 +224,13 @@ export abstract class BaseWallet implements WalletInterface {
   }
 
   /**
+   * Access DCA helpers for protocol-native recurring orders and per-cycle swap previews.
+   */
+  dca(): DcaClientInterface {
+    return this.dcaClient;
+  }
+
+  /**
    * Fetch a quote.
    *
    * Set `request.provider` to a provider instance or provider id.
@@ -218,20 +246,30 @@ export abstract class BaseWallet implements WalletInterface {
   }
 
   /**
+   * Prepare a swap without executing it.
+   *
+   * Advanced API for batching, simulation, or custom execution flows.
+   * Most apps should prefer `wallet.swap(...)`.
+   */
+  async prepareSwap(request: SwapInput): Promise<PreparedSwap> {
+    const { provider, request: resolvedRequest } = resolveSwapInput(request, {
+      walletChainId: this.getChainId(),
+      takerAddress: this.address,
+      providerResolver: this,
+    });
+    const prepared = await provider.prepareSwap(resolvedRequest);
+    this.assertSwapCalls(prepared.calls, `provider "${provider.id}"`);
+    return prepared;
+  }
+
+  /**
    * Execute a swap.
    *
    * Set `request.provider` to a provider instance or provider id.
    * If omitted, uses the wallet default provider.
    */
   async swap(request: SwapInput, options?: ExecuteOptions): Promise<Tx> {
-    const { provider, request: resolvedRequest } = resolveSwapInput(request, {
-      walletChainId: this.getChainId(),
-      takerAddress: this.address,
-      providerResolver: this,
-    });
-    const prepared = await provider.swap(resolvedRequest);
-    this.assertSwapCalls(prepared.calls, `provider "${provider.id}"`);
-    return await this.execute(prepared.calls, options);
+    return await this.execute((await this.prepareSwap(request)).calls, options);
   }
 
   registerSwapProvider(provider: SwapProvider, makeDefault = false): void {

@@ -11,7 +11,8 @@ import type { TxBuilder } from "@/tx/builder";
 import type { Erc20 } from "@/erc20";
 import type { Staking } from "@/staking";
 import type { LendingClient } from "@/lending";
-import type { SwapInput, SwapQuote, SwapProvider } from "@/swap";
+import type { DcaClientInterface } from "@/dca";
+import type { PreparedSwap, SwapInput, SwapQuote, SwapProvider } from "@/swap";
 import type {
   Address,
   Amount,
@@ -103,12 +104,25 @@ export interface WalletInterface extends BridgeOperatorInterface {
   lending(): LendingClient;
 
   /**
+   * Access DCA helpers for protocol-native recurring orders and per-cycle swap previews.
+   */
+  dca(): DcaClientInterface;
+
+  /**
    * Fetch a quote.
    *
    * Set `request.provider` to a provider instance or provider id.
    * If omitted, uses the wallet default provider.
    */
   getQuote(request: SwapInput): Promise<SwapQuote>;
+
+  /**
+   * Prepare a swap without executing it.
+   *
+   * Advanced API for batching, simulation, or custom execution flows.
+   * Most apps should prefer `wallet.swap(...)`.
+   */
+  prepareSwap(request: SwapInput): Promise<PreparedSwap>;
 
   /**
    * Execute a swap.

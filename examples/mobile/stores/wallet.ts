@@ -31,14 +31,17 @@ import {
   showTransactionToast,
   updateTransactionToast,
 } from "@/components/Toast";
+import {
+  MAINNET_PAYMASTER_DISABLED_MESSAGE,
+  resolveExamplePaymasterNodeUrl,
+} from "@/constants/paymaster";
+import { swapProviders } from "@/swaps";
+import { getDcaProviders } from "@/dca";
 
 // Privy server URL - change this to your server URL
 export const PRIVY_SERVER_URL = process.env.EXPO_PUBLIC_PRIVY_SERVER_URL ?? "";
-const PAYMASTER_PROXY_URL =
-  process.env.EXPO_PUBLIC_PAYMASTER_PROXY_URL ??
-  (PRIVY_SERVER_URL
-    ? `${PRIVY_SERVER_URL.replace(/\/$/, "")}/api/paymaster`
-    : "");
+const EXPLICIT_PAYMASTER_PROXY_URL =
+  process.env.EXPO_PUBLIC_PAYMASTER_PROXY_URL ?? "";
 
 /** Get explorer URL for a transaction hash */
 function getExplorerUrl(txHash: string, chainId: ChainId): string {
@@ -327,7 +330,11 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       };
     }
 
-    const paymasterNodeUrl = PAYMASTER_PROXY_URL.trim() || null;
+    const paymasterNodeUrl = resolveExamplePaymasterNodeUrl({
+      explicitProxyUrl: EXPLICIT_PAYMASTER_PROXY_URL,
+      privyServerUrl: PRIVY_SERVER_URL,
+      chainId: chainId.toLiteral(),
+    });
 
     const newSdk = new StarkZap({
       rpcUrl,
@@ -361,6 +368,8 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     addLog(`Chain: ${chainId.toLiteral()}`);
     if (paymasterNodeUrl) {
       addLog(`Paymaster: ${paymasterNodeUrl}`);
+    } else if (chainId.isMainnet()) {
+      addLog(MAINNET_PAYMASTER_DISABLED_MESSAGE);
     } else {
       addLog("Paymaster: disabled");
     }
@@ -837,6 +846,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     addLog(`Connecting with ${selectedPreset} account...`);
 
     try {
+      const dcaProviders = getDcaProviders();
       const signer = new StarkSigner(privateKey.trim());
       const onboard = await sdk.onboard({
         strategy: OnboardStrategy.Signer,
@@ -844,6 +854,10 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         ...(preferSponsored && { feeMode: "sponsored" as const }),
         account: { signer },
         accountPreset: PRESETS[selectedPreset],
+        swapProviders,
+        defaultSwapProviderId: swapProviders[0]?.id,
+        dcaProviders,
+        defaultDcaProviderId: dcaProviders[0]?.id,
       });
       const connectedWallet = onboard.wallet;
 
@@ -880,11 +894,16 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     addLog(`Connecting with Privy (${email})...`);
 
     try {
+      const dcaProviders = getDcaProviders();
       const onboard = await sdk.onboard({
         strategy: OnboardStrategy.Privy,
         deploy: "never",
         ...(preferSponsored && { feeMode: "sponsored" as const }),
         accountPreset: PRESETS[privySelectedPreset],
+        swapProviders,
+        defaultSwapProviderId: swapProviders[0]?.id,
+        dcaProviders,
+        defaultDcaProviderId: dcaProviders[0]?.id,
         privy: {
           resolve: async () => ({
             walletId,
